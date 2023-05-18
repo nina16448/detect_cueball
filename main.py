@@ -22,7 +22,7 @@ def main():
         if not ret:
             break
 
-        warped_frame = MD.run(frame)
+        warped_frame, labels_info = MD.run(frame)
 
 
         out.write(warped_frame)
