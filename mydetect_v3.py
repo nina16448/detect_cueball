@@ -1,4 +1,5 @@
 import torch
+import cv2
 from models.common import DetectMultiBackend
 from utils.general import check_img_size, non_max_suppression, scale_coords
 from utils.torch_utils import select_device
@@ -26,8 +27,10 @@ def run(img, model, imgsz=640, conf_thres=0.5):
     pred = non_max_suppression(pred, conf_thres)
 
     # Process detections
+    # Process detections
     im0 = img.clone().detach().cpu().numpy()
     im0 = (im0 * 255).astype("uint8")  # convert to 8-bit unsigned integer for OpenCV
+    im0 = cv2.cvtColor(im0, cv2.COLOR_RGB2BGR)  # convert color space from RGB to BGR
     annotator = Annotator(im0)
     for i, det in enumerate(pred):  # detections per image
         if len(det):
