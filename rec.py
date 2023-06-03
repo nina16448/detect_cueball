@@ -7,18 +7,22 @@ from collections import Counter
 
 
 def histogram_equalization(img, rang):
-    # 用 Counter 計算圖像像素值的頻率
-    pixel_counts = Counter(img.ravel())
+    # 將圖像像素值轉換為整數
+    img = img.astype(int)
+
+    # 獲取圖像的高度和寬度
+    height, width = img.shape
 
     # 初始化直方圖
     hist = [0] * rang
 
-    # 將像素值頻率填充到直方圖中
-    for pixel_value, count in pixel_counts.items():
-        hist[pixel_value] = count
+    # 計算像素值的頻率並填充到直方圖中
+    for i in range(height):
+        for j in range(width):
+            hist[img[i, j]] += 1
 
     # 計算累積分佈函數 (CDF)
-    cdf = [sum(hist[: i + 1]) for i in range(rang)]
+    cdf = [sum(hist[:i + 1]) for i in range(rang)]
 
     # 找到 CDF 的最小非零值
     cdf_min = next(value for value in cdf if value > 0)
@@ -33,6 +37,7 @@ def histogram_equalization(img, rang):
 
     # 應用 LUT 並返回結果圖像
     return lut[img].astype(np.uint8)
+
 
 
 def equalize_hist(hsi_image):
