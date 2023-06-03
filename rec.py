@@ -1,267 +1,277 @@
-import argparse
-import os
-import platform
-import sys
-from pathlib import Path
-import time
-
-import torch
-
-FILE = Path(__file__).resolve()
-ROOT = FILE.parents[0]  # YOLOv5 root directory
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))  # add ROOT to PATH
-ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
-from models.common import DetectMultiBackend
-from utils.dataloaders import (
-    IMG_FORMATS,
-    VID_FORMATS,
-    LoadImages,
-    LoadScreenshots,
-    LoadStreams,
-)
-from utils.general import (
-    LOGGER,
-    Profile,
-    check_file,
-    check_img_size,
-    check_imshow,
-    check_requirements,
-    colorstr,
-    cv2,
-    increment_path,
-    non_max_suppression,
-    print_args,
-    scale_boxes,
-    strip_optimizer,
-    xyxy2xywh,
-)
-from utils.plots import Annotator, colors, save_one_box
-from utils.torch_utils import select_device, smart_inference_mode
-
-# 在腳本的開頭創建一個顏色列表
-import random
+import math
+import cv2 as cv
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from collections import Counter
 
 
-@smart_inference_mode()
-def run(
-    weights=ROOT / "yolov5s.pt",  # model path or triton URL
-    source=ROOT / "data/images",  # file/dir/URL/glob/screen/0(webcam)
-    data=ROOT / "data/coco128.yaml",  # dataset.yaml path
-    imgsz=(640, 640),  # inference size (height, width)
-    conf_thres=0.25,  # confidence threshold
-    iou_thres=0.45,  # NMS IOU threshold
-    max_det=1000,  # maximum detections per image
-    device="",  # cuda device, i.e. 0 or 0,1,2,3 or cpu
-    view_img=True,  # show results
-    save_txt=True,  # save results to *.txt
-    save_conf=False,  # save confidences in --save-txt labels
-    save_crop=False,  # save cropped prediction boxes
-    nosave=False,  # do not save images/videos
-    classes=None,  # filter by class: --class 0, or --class 0 2 3
-    agnostic_nms=False,  # class-agnostic NMS
-    augment=False,  # augmented inference
-    visualize=False,  # visualize features
-    update=False,  # update all models
-    project=ROOT / "runs/detect",  # save results to project/name
-    name="exp",  # save results to project/name
-    exist_ok=False,  # existing project/name ok, do not increment
-    line_thickness=3,  # bounding box thickness (pixels)
-    hide_labels=False,  # hide labels
-    hide_conf=False,  # hide confidences
-    half=False,  # use FP16 half-precision inference
-    dnn=False,  # use OpenCV DNN for ONNX inference
-    vid_stride=1,  # video frame-rate stride
-):
-    t0 = time.time()  # 記錄當前時間
-    source = str(source)
-    save_img = not nosave and not source.endswith(".txt")  # save inference images
-    is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
-    is_url = source.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
-    webcam = (
-        source.isnumeric() or source.endswith(".streams") or (is_url and not is_file)
+def histogram_equalization(img, rang):
+    # 用 Counter 計算圖像像素值的頻率
+    pixel_counts = Counter(img.ravel())
+
+    # 初始化直方圖
+    hist = [0] * rang
+
+    # 將像素值頻率填充到直方圖中
+    for pixel_value, count in pixel_counts.items():
+        hist[pixel_value] = count
+
+    # 計算累積分佈函數 (CDF)
+    cdf = [sum(hist[: i + 1]) for i in range(rang)]
+
+    # 找到 CDF 的最小非零值
+    cdf_min = next(value for value in cdf if value > 0)
+
+    # 正規化 CDF
+    cdf_normalized = [
+        (value - cdf_min) * (rang - 1) / (cdf[-1] - cdf_min) for value in cdf
+    ]
+
+    # 創建對照表 (Lookup Table, LUT)
+    lut = np.interp(np.arange(rang), np.arange(rang), cdf_normalized)
+
+    # 應用 LUT 並返回結果圖像
+    return lut[img].astype(np.uint8)
+
+
+def equalize_hist(hsi_image):
+    # Split the image into H, S, and I channels
+    h, s, i = hsi_image[:, :, 0], hsi_image[:, :, 1], hsi_image[:, :, 2]
+
+    # Equalize the histogram of the S and I channels
+    s_eq = histogram_equalization((s * 255).astype(np.uint8), 256) / 255.0
+    i_eq = histogram_equalization((i * 255).astype(np.uint8), 256) / 255.0
+
+    # Combine the equalized S and I channels with the original H channel
+    hsi_eq = np.dstack((h, s_eq, i_eq))
+
+    return hsi_eq
+
+
+def equalize_hist_rgb(rgb_image):
+    # Split the image into R, G, and B channels
+    r, g, b = rgb_image[:, :, 0], rgb_image[:, :, 1], rgb_image[:, :, 2]
+
+    # Equalize the histogram of the R, G, and B channels
+    r_eq = histogram_equalization(r, 256)
+    g_eq = histogram_equalization(g, 256)
+    b_eq = histogram_equalization(b, 256)
+
+    # Combine the equalized R, G, and B channels
+    rgb_eq = np.dstack((r_eq, g_eq, b_eq))
+
+    return rgb_eq
+
+
+def equalize_hist_lab(lab_image):
+    # Split the image into L, a, and b channels
+    l, a, b = lab_image[:, :, 0], lab_image[:, :, 1], lab_image[:, :, 2]
+
+    # Equalize the histogram of the L channel
+    l_eq = histogram_equalization(l, 101)
+
+    # Combine the equalized L channel with the original a and b channels
+    lab_eq = np.dstack((l_eq, a, b))
+
+    return lab_eq
+
+
+def rgb_to_hsi(rgb_image):
+    # Normalize RGB values to the range 0-1
+    rgb_image = rgb_image / 255.0
+
+    # Split the image into R, G, and B channels
+    r, g, b = rgb_image[:, :, 0], rgb_image[:, :, 1], rgb_image[:, :, 2]
+
+    # Calculate the intensity
+    i = np.mean(rgb_image, axis=2)
+
+    # Calculate the saturation
+    min_color = np.min(rgb_image, axis=2)
+    s = 1 - 3 * min_color / (
+        r + g + b + 1e-6
+    )  # Add a small value to avoid division by zero
+
+    # Calculate the hue
+    sqrt_val = np.sqrt((r - g) ** 2 + (r - b) * (g - b))
+    acos_val = np.arccos(
+        0.5 * ((r - g) + (r - b)) / (sqrt_val + 1e-6)
+    )  # Add a small value to avoid division by zero
+    h = acos_val * 180 / np.pi
+    h[b > g] = 360 - h[b > g]
+
+    # Create the HSI image
+    hsi_image = np.dstack((h, s, i))
+
+    return hsi_image
+
+
+def hsi_to_rgb(hsi_image):
+    # Split the image into H, S, and I channels
+    h, s, i = hsi_image[:, :, 0], hsi_image[:, :, 1], hsi_image[:, :, 2]
+
+    # Initialize the RGB image
+    rgb_image = np.zeros(hsi_image.shape)
+
+    # Calculate the RGB values
+    h_rad = h * np.pi / 180  # Convert hue from degrees to radians
+
+    # Case 1: 0 <= H < 2*pi/3
+    cond1 = np.logical_and(0 <= h_rad, h_rad < 2 * np.pi / 3)
+    rgb_image[cond1, 2] = i[cond1] * (1 - s[cond1])
+    rgb_image[cond1, 0] = i[cond1] * (
+        1 + s[cond1] * np.cos(h_rad[cond1]) / np.cos(np.pi / 3 - h_rad[cond1])
     )
-    screenshot = source.lower().startswith("screen")
-    if is_url and is_file:
-        source = check_file(source)  # download
+    rgb_image[cond1, 1] = 3 * i[cond1] - (rgb_image[cond1, 0] + rgb_image[cond1, 2])
 
-    # Directories
-    save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
-    (save_dir / "labels" if save_txt else save_dir).mkdir(
-        parents=True, exist_ok=True
-    )  # make dir
+    # Case 2: 2*pi/3 <= H < 4*pi/3
+    cond2 = np.logical_and(2 * np.pi / 3 <= h_rad, h_rad < 4 * np.pi / 3)
+    h_rad[cond2] = h_rad[cond2] - 2 * np.pi / 3
+    rgb_image[cond2, 0] = i[cond2] * (1 - s[cond2])
+    rgb_image[cond2, 1] = i[cond2] * (
+        1 + s[cond2] * np.cos(h_rad[cond2]) / np.cos(np.pi / 3 - h_rad[cond2])
+    )
+    rgb_image[cond2, 2] = 3 * i[cond2] - (rgb_image[cond2, 0] + rgb_image[cond2, 1])
 
-    # Load model
-    device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
-    stride, names, pt = model.stride, model.names, model.pt
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    # Case 3: 4*pi/3 <= H < 2*pi
+    cond3 = 4 * np.pi / 3 <= h_rad
+    h_rad[cond3] = h_rad[cond3] - 4 * np.pi / 3
+    rgb_image[cond3, 1] = i[cond3] * (1 - s[cond3])
+    rgb_image[cond3, 2] = i[cond3] * (
+        1 + s[cond3] * np.cos(h_rad[cond3]) / np.cos(np.pi / 3 - h_rad[cond3])
+    )
+    rgb_image[cond3, 0] = 3 * i[cond3] - (rgb_image[cond3, 1] + rgb_image[cond3, 2])
 
-    if isinstance(imgsz, int):
-        imgsz = (imgsz, imgsz)  # 將 imgsz 轉換為一個元組
+    # Ensure RGB values are in the range 0-255
+    rgb_image = np.clip(rgb_image, 0, 1) * 255
 
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
-
-    # Dataloader
-    bs = 1  # batch_size
-    if webcam:
-        view_img = check_imshow(warn=True)
-        dataset = LoadStreams(
-            source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride
-        )
-        bs = len(dataset)
-    elif screenshot:
-        dataset = LoadScreenshots(source, img_size=imgsz, stride=stride, auto=pt)
-    else:
-        dataset = LoadImages(
-            source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride
-        )
-    vid_path, vid_writer = [None] * bs, [None] * bs
-
-    # Run inference
-    model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
-    seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
-    for path, im, im0s, vid_cap, s in dataset:
-        with dt[0]:
-            im = torch.from_numpy(im).to(model.device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-            if len(im.shape) == 3:
-                im = im[None]  # expand for batch dim
-            # Inference
-            with dt[1]:
-                pred = model(im, augment=augment, visualize=visualize)[0]
-            # NMS
-            with dt[2]:
-                pred = non_max_suppression(
-                    pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det
-                )
-        # Process detections
-        # 在處理檢測結果的部分，使用 Annotator 來替代原本的 plot_one_box 函數
-        for i, det in enumerate(pred):  # detections per image
-            seen += 1
-            if webcam:  # batch_size >= 1
-                p, s, im0, frame = path[i], f"{i}: ", im0s[i].copy(), dataset.count
-            else:
-                p, s, im0, frame = path, "", im0s, getattr(dataset, "frame", 0)
-
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # img.jpg
-            txt_path = str(save_dir / "labels" / p.stem) + (
-                "" if dataset.mode == "image" else f"_{frame}"
-            )  # img.txt
-            s += "%gx%g " % imgsz  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            annotator = Annotator(im0, line_width=line_thickness)
-            if len(det):
-                # Rescale boxes from imgsz to im0 size
-                if len(im.shape) == 4:
-                    im_shape = im.shape[2:]
-                else:
-                    im_shape = im.shape[1:]
-                if len(im0.shape) == 3:
-                    im0_shape = im0.shape[:2]
-                else:
-                    im0_shape = im0.shape[1:3]
-                det[:, :4] = scale_boxes(det[:, :4], im_shape, im0_shape)
-                # Rescale boxes from imgsz to im0 size
-                # det[:, :4] = scale_boxes(det[:, :4], im.shape[2:], im0.shape)
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (
-                            (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn)
-                            .view(-1)
-                            .tolist()
-                        )  # normalized xywh
-                        line = (
-                            (cls, *xywh, conf) if save_conf else (cls, *xywh)
-                        )  # label format
-                        with open(txt_path + ".txt", "a") as f:
-                            f.write(("%g " * len(line)).rstrip() % line + "\n")
-                    if save_img or view_img:  # Add bbox to image
-                        label = f"{names[int(cls)]} {conf:.2f}"
-                        annotator.box_label(xyxy, label, color=colors[int(cls)])
-            im0 = annotator.im
-            # Print time (inference + NMS)
-            print(f"{s}Done. ({dt[2].sum():.3f}s)")
-            # Stream results
-            if view_img:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
-
-    print(f"Done. ({time.time() - t0:.3f}s)")
+    return rgb_image.astype("uint8")
 
 
+def lab_to_rgb(lab_image):
+    # Split the image into L, a, and b channels
+    l, a, b = lab_image[:, :, 0], lab_image[:, :, 1], lab_image[:, :, 2]
+
+    # Define the function for transforming Lab to XYZ
+    def f_inv(t):
+        return np.where(t > 0.206893, t**3, (t - 16 / 116) / 7.787)
+
+    # Transform Lab to XYZ
+    y = (l + 16) / 116
+    x = a / 500 + y
+    z = y - b / 200
+    xyz_image = np.dstack((f_inv(x), f_inv(y), f_inv(z)))
+
+    # Normalize XYZ values
+    xyz_image *= np.array([95.047, 100.000, 108.883])
+
+    # Define the transformation matrix from XYZ to RGB
+    M = np.array(
+        [
+            [3.2406, -1.5372, -0.4986],
+            [-0.9689, 1.8758, 0.0415],
+            [0.0557, -0.2040, 1.0570],
+        ]
+    )
+
+    # Transform XYZ to RGB
+    rgb_image = np.dot(xyz_image, M.T)
+
+    # Clip the values to the range 0-1
+    rgb_image = np.clip(rgb_image, 0, 1)
+
+    # Convert the values to the range 0-255
+    rgb_image = (rgb_image * 255).astype(np.uint8)
+
+    return rgb_image
+
+
+def rgb_to_lab(rgb_image):
+    # Normalize RGB values to the range 0-1
+    rgb_image = rgb_image / 255.0
+
+    # Define the transformation matrix from RGB to XYZ
+    M = np.array(
+        [[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]
+    )
+
+    # Transform RGB to XYZ
+    xyz_image = np.dot(rgb_image, M.T)
+
+    # Normalize XYZ values
+    xyz_image /= np.array([95.047, 100.000, 108.883])
+
+    # Define the function for transforming XYZ to Lab
+    def f(t):
+        return np.where(t > 0.008856, t ** (1 / 3), 7.787 * t + 16 / 116)
+
+    # Transform XYZ to Lab
+    lab_image = np.zeros(rgb_image.shape)
+    lab_image[:, :, 0] = 116 * f(xyz_image[:, :, 1]) - 16  # L
+    lab_image[:, :, 1] = 500 * (f(xyz_image[:, :, 0]) - f(xyz_image[:, :, 1]))  # a
+    lab_image[:, :, 2] = 200 * (f(xyz_image[:, :, 1]) - f(xyz_image[:, :, 2]))  # b
+
+    return lab_image
+
+
+def main():
+    # List of image paths
+    image_paths = [
+        "HW3_test_image/aloe.jpg",
+        "HW3_test_image/church.jpg",
+        "HW3_test_image/house.jpg",
+        "HW3_test_image/kitchen.jpg",
+    ]
+
+    # Loop through the image paths
+    for image_path in image_paths:
+        # Open the image
+        rgb_image = np.array(Image.open(image_path))
+
+        # Equalize the histogram of the RGB image
+        rgb_eq = equalize_hist_rgb(rgb_image)
+
+        # Convert the image to HSI
+        hsi_image = rgb_to_hsi(rgb_image)
+
+        # Equalize the histogram of the S and I channels
+        hsi_eq = equalize_hist(hsi_image)
+
+        # Convert the equalized HSI image back to RGB
+        rgb_image_back_from_hsi = hsi_to_rgb(hsi_eq)
+
+        # Convert the image to Lab
+        lab_image = rgb_to_lab(rgb_image)
+
+        # Equalize the histogram of the L channel
+        lab_eq = equalize_hist_lab(lab_image)
+
+        # Convert the equalized Lab image back to RGB
+        rgb_image_back_from_lab = lab_to_rgb(lab_eq)
+
+        # Display the original image, the equalized RGB image, the RGB image back from HSI, and the RGB image back from Lab
+        plt.figure(figsize=(20, 5))
+
+        plt.subplot(1, 4, 1)
+        plt.imshow(rgb_image)
+        plt.title("Original Image")
+
+        plt.subplot(1, 4, 2)
+        plt.imshow(rgb_eq)
+        plt.title("Equalized RGB Image")
+
+        plt.subplot(1, 4, 3)
+        plt.imshow(rgb_image_back_from_hsi)
+        plt.title("RGB Image Back from HSI")
+
+        plt.subplot(1, 4, 4)
+        plt.imshow(rgb_image_back_from_lab)
+        plt.title("RGB Image Back from Lab")
+
+        plt.show()
+
+
+# Call the main function
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--weights", nargs="+", type=str, default="yolov5s.pt", help="model.pt path(s)"
-    )
-    parser.add_argument(
-        "--source", type=str, default="data/images", help="source"
-    )  # file/folder, 0 for webcam
-    parser.add_argument(
-        "--imgsz",
-        "--img",
-        "--img-size",
-        type=int,
-        default=640,
-        help="inference size (pixels)",
-    )
-    parser.add_argument(
-        "--conf-thres", type=float, default=0.25, help="object confidence threshold"
-    )
-    parser.add_argument(
-        "--iou-thres", type=float, default=0.45, help="IOU threshold for NMS"
-    )
-    parser.add_argument(
-        "--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu"
-    )
-    parser.add_argument("--view-img", action="store_true", help="display results")
-    parser.add_argument("--save-txt", action="store_true", help="save results to *.txt")
-    parser.add_argument(
-        "--save-conf", action="store_true", help="save confidences in --save-txt labels"
-    )
-    parser.add_argument(
-        "--classes",
-        nargs="+",
-        type=int,
-        help="filter by class: --class 0,or --class 0 2 3",
-    )
-    parser.add_argument(
-        "--agnostic-nms", action="store_true", help="class-agnostic NMS"
-    )
-    parser.add_argument("--augment", action="store_true", help="augmented inference")
-    parser.add_argument("--update", action="store_true", help="update all models")
-    parser.add_argument(
-        "--project", default="runs/detect", help="save results to project/name"
-    )
-    parser.add_argument("--name", default="exp", help="save results to project/name")
-    parser.add_argument(
-        "--exist-ok",
-        action="store_true",
-        help="existing project/name ok, do not increment",
-    )
-    parser.add_argument(
-        "--line-thickness", default=3, type=int, help="bounding box thickness (pixels)"
-    )
-    parser.add_argument(
-        "--hide-labels", default=False, action="store_true", help="hide labels"
-    )
-    parser.add_argument(
-        "--hide-conf", default=False, action="store_true", help="hide confidences"
-    )
-    parser.add_argument(
-        "--half", action="store_true", help="use FP16 half-precision inference"
-    )
-    opt = parser.parse_args()
-    print(opt)
-    check_requirements(exclude=("tensorboard", "thop"))
-
-    run(**vars(opt))
+    main()
